@@ -17,14 +17,20 @@ const getDefaultRedisConfigs = () => {
 }
 
 let _redisClient: Redis.Redis;
-export const getExistingRedisClient = (config = getDefaultRedisConfigs()) => {
+export const getExistingRedisClient = (config: {
+  host: string,
+  port: number
+} = getDefaultRedisConfigs()) => {
   if (!_redisClient) {
     _redisClient = new Redis(config);
   }
   return _redisClient;
 };
 
-export const getNewRedisClient = (config = getDefaultRedisConfigs()) => {
+export const getNewRedisClient = (config: {
+  host: string,
+  port: number
+} = getDefaultRedisConfigs()) => {
   return new Redis(config);
 };
 
@@ -141,6 +147,7 @@ export class RedisStreams {
     }
 
     const newStream = <StreamGroupConsumer>{
+      consume,
       handle,
       produceMany,
       produce,
@@ -457,10 +464,14 @@ export type ProduceFunc = <T>(...events: IEvent<T>[]) => {
 }
 
 export type StreamGroupConsumer = {
+  consume: () => Promise<{
+    stop: () => void;
+    continue: () => void;
+  }>;
   handle: HandleFunc;
   produce: <T>(...events: IEvent<T>[]) => Promise<void>;
   produceMany: ProduceFunc;
-  with: <O extends FunctionsMap<R>, R>(events: O) => WithTypedHandlers<O, R>;
+  with: <O extends FunctionsMap<R>, R>(events: O) => WithTypedHandlers<O, R> & StreamGroupConsumer;
 }
 
 export type ConsumerGroup = {
