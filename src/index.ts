@@ -458,7 +458,7 @@ export type HandleFunc = <T = any, E = string>(event: E | '*', handler: EventHan
   }>;
 };
 
-export type ProduceFunc = <T>(...events: IEvent<T>[]) => {
+export type ProduceFunc = (...events: IEvent<any>[]) => {
   produceMany: ProduceFunc;
   flush: () => Promise<void>;
 }
@@ -469,7 +469,7 @@ export type StreamGroupConsumer = {
     continue: () => void;
   }>;
   handle: HandleFunc;
-  produce: <T>(...events: IEvent<T>[]) => Promise<void>;
+  produce: (...events: IEvent<any>[]) => Promise<void>;
   produceMany: ProduceFunc;
   with: <O extends FunctionsMap<R>, R>(events: O) => WithTypedHandlers<O, R> & StreamGroupConsumer;
 }
