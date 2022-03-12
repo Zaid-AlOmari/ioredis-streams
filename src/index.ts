@@ -34,6 +34,13 @@ export const getNewRedisClient = (config: {
   return new Redis(config);
 };
 
+export interface IEvent<T> {
+  time: number;
+  name: string;
+  v: string;
+  data: T;
+}
+
 export class RedisStreams {
 
   protected groups: Map<string, Map<string, StreamGroupConsumer>> = new Map();
@@ -58,7 +65,7 @@ export class RedisStreams {
     }, config || {});
   }
 
-  private buildConsumerConfigs(streamName: string, groupName: string, config?: Partial<RegisterConsumerConfigs>) {
+  private buildConsumerConfigs(streamName: string, groupName: string, config?: Partial<StreamConfigs>) {
     return <ConsumerConfigs>Object.assign(<ConsumerConfigs>{
       claimIdleTime: 15000,
       groupName,
@@ -80,7 +87,7 @@ export class RedisStreams {
     }, config || {});
   }
 
-  private register(streamName: string, groupName: string, handlers: Map<string, EventHandler<{}>>, config: ConsumerConfigs) {
+  private register(streamName: string, groupName: string, handlers: Map<string, NamedEventHandler>, config: ConsumerConfigs) {
     const handler = async <T>(id: string, event: string | '*', eventObj: IEvent<T>) => {
       let handle = handlers.get(event);
       if (!handle) handle = handlers.get('*');
@@ -106,7 +113,7 @@ export class RedisStreams {
   group(groupName: string) {
     const streams = this.getStreamsMap(groupName);
     return <ConsumerGroup>{
-      stream: (streamName: string, config?: Partial<RegisterConsumerConfigs>) => {
+      stream: (streamName: string, config?: Partial<StreamConfigs>) => {
         const stream = streams.get(streamName);
         if (stream) return stream;
         const newStream = this.stream(streamName, groupName, config);
@@ -116,8 +123,8 @@ export class RedisStreams {
     }
   }
 
-  private stream(streamName: string, groupName: string, config?: Partial<RegisterConsumerConfigs>) {
-    const handlers = new Map<string, EventHandler<{}>>();
+  private stream(streamName: string, groupName: string, config?: Partial<StreamConfigs>) {
+    const handlers = new Map<string, NamedEventHandler>();
     const readyConfigs = this.buildConsumerConfigs(streamName, groupName, config);
     const stream = this.register(streamName, groupName, handlers, readyConfigs);
     const consume = async () => {
@@ -128,8 +135,8 @@ export class RedisStreams {
         continue: () => { stream.start(); return; }
       }
     };
-    const handle = <T>(event: string | '*', handler: EventHandler<T>) => {
-      handlers.set(event, <EventHandler<{}>>handler);
+    const handle = <T extends IEvent<D>, D>(event: string | '*', handler: NamedEventHandler<T>) => {
+      handlers.set(event, <NamedEventHandler>handler);
       return { handle, consume };
     };
     const produceMany = <T>(...events: IEvent<T>[]) => {
@@ -176,6 +183,7 @@ export class RedisStreams {
   }
 }
 
+type EventProccessor = <T>(id: string, event: string, eventObj: IEvent<T>) => Promise<void>;
 class StreamConsumer {
 
   protected logger!: loggerFactory.Logger;
@@ -391,24 +399,12 @@ class ConsumerBuffer {
   }
 }
 
-const augmentEvents = <T extends FunctionsMap<R>, R>(events: T, stream: StreamGroupConsumer) => {
-  const initial = <WithTypedHandlers<T, R> & StreamGroupConsumer>{ ...events, ...stream };
+const augmentEvents = <T>(events: T, stream: StreamGroupConsumer) => {
   return Object.keys(events).reduce((p, c) => {
-    p[c] = (...args: any[]) => events[c](...args).then((event: any) => {
-      return stream.produce(event)
-    });
+    p[c] = async (...args: any[]) => stream.produce(events[c](...args))
     return p;
-  }, initial)
+  }, { ...events, ...stream })
 }
-
-export interface IEvent<T, EventName extends string = string> {
-  time: number;
-  name: EventName;
-  v: string;
-  data: T;
-}
-
-export type EventProccessor = <T>(id: string, event: string, eventObj: IEvent<T>) => Promise<void>;
 
 export type DeadLetterEvent = IEvent<{
   id: string,
@@ -430,7 +426,7 @@ export type RedisStreamsConfig = {
   };
 }
 
-export type RegisterConsumerConfigs = {
+export type StreamConfigs = {
   readBlockTime: number;
   claimIdleTime: number;
   batchSize: number;
@@ -438,7 +434,7 @@ export type RegisterConsumerConfigs = {
   maxLen: number;
 };
 
-export type ConsumerConfigs = RegisterConsumerConfigs & {
+type ConsumerConfigs = StreamConfigs & {
   peerName: string;
   streamName: string;
   groupName: string;
@@ -448,52 +444,48 @@ export type ConsumerConfigs = RegisterConsumerConfigs & {
     maxRetries: number
   }
 }
-export type EventHandler<T> = (id: string, event: IEvent<T>) => Promise<void>;
 
-export type HandleFunc = <T = any, E = string>(event: E | '*', handler: EventHandler<T>) => {
-  handle: HandleFunc;
-  consume: () => Promise<{
-    stop: () => void;
-    continue: () => void;
-  }>;
-};
-
-export type ProduceFunc = (...events: IEvent<any>[]) => {
+type ProduceFunc = (...events: IEvent<any>[]) => {
   produceMany: ProduceFunc;
   flush: () => Promise<void>;
 }
 
-export type StreamGroupConsumer = {
-  consume: () => Promise<{
-    stop: () => void;
-    continue: () => void;
-  }>;
-  handle: HandleFunc;
+type StreamGroupConsumer = ConsumeFunctions & {
+  handle: HandleFunction<any>;
   produce: (...events: IEvent<any>[]) => Promise<void>;
   produceMany: ProduceFunc;
-  with: <O extends FunctionsMap<R>, R>(events: O) => WithTypedHandlers<O, R> & StreamGroupConsumer;
+  with: <O extends AllowedFactories<O>>(events: O) => WithTypedHandlers<O>;
 }
 
-export type ConsumerGroup = {
-  stream: (streamName: string, config?: Partial<RegisterConsumerConfigs>) => StreamGroupConsumer;
+type ConsumerGroup = {
+  stream: (streamName: string, config?: Partial<StreamConfigs>) => StreamGroupConsumer;
 }
 
-export type HandleFunction<O extends FunctionsMap<R>, R> = <N extends (keyof O & string) >(event: N, handler: NamedEventHandler<ReturnType<O[N], N>>) => {
-  handle: HandleFunction<O, R>;
+type NamedEvent<T, N extends string> = IEvent<T> & { name: N };
+type ReturnType<T> = T extends (...args: any[]) => infer R ? R : any;
+type DataOfHandler<T> = T extends (...args: any[]) => IEvent<infer R> ? R : any;
+type ArgsOf<T> = T extends (...args: infer Args) => any ? Args : never;
+
+type AllowedFactories<T> = { [name in (keyof T & string)]: (...args: any[]) => NamedEvent<DataOfHandler<T[name]>, name> };
+type NamedEventHandler<E = IEvent<any>> = (id: string, event: E) => Promise<void>;
+
+type ConsumeFunctions = {
   consume: () => Promise<{
     stop: () => void;
     continue: () => void;
   }>;
-};
-
-type WithTypedHandlers<T extends FunctionsMap<R>, R> = T & {
-  handle: HandleFunction<T, R>
 }
-type UnrwapPromiseEvent<T, N extends string> = T extends Promise<IEvent<infer D>> ? IEvent<D, N> : unknown;
-type ReturnType<T, N extends string> = T extends (...args: any[]) => infer R ? UnrwapPromiseEvent<R, N> : unknown;
+type HandleFunction<T> = <N extends (keyof T | '*') >(event: N, handler: NamedEventHandler<N extends keyof T ? ReturnType<T[N]> : IEvent<any>>) => {
+  handle: HandleFunction<T>;
+} & ConsumeFunctions;
 
-type FunctionsMap<T> = {
-  [func in keyof T]: T[func];
+
+type WithTypedHandlers<T> = PromisifiedFunctionsMap<T> & {
+  handle: HandleFunction<T>
+} & Omit<StreamGroupConsumer, 'handle'>;
+
+
+type PromisifiedFunctionsMap<T> = {
+  [func in keyof T]: (...args: ArgsOf<T[func]>) => Promise<void>
 };
 
-type NamedEventHandler<E> = (id: string, event: E) => Promise<void>;
