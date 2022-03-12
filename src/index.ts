@@ -466,7 +466,7 @@ type ReturnType<T> = T extends (...args: any[]) => infer R ? R : any;
 type DataOfHandler<T> = T extends (...args: any[]) => IEvent<infer R> ? R : any;
 type ArgsOf<T> = T extends (...args: infer Args) => any ? Args : never;
 
-type AllowedFactories<T> = { [name in (keyof T & string)]: (...args: any[]) => NamedEvent<DataOfHandler<T[name]>, name> };
+type AllowedFactories<T> = { [name in (keyof T & string)]: (...args: any[]) => IEvent<DataOfHandler<T[name]>> };
 export type NamedEventHandler<E = IEvent<any>> = (id: string, event: E) => Promise<void>;
 
 export type ConsumeFunctions = {
@@ -491,7 +491,7 @@ type PromisifiedFunctionsMap<T> = {
 
 export const event = <N extends string>(name: N, v = '1.0.0') => {
   type ReturnType<T, N extends string> = {
-    [K in N]: (data: T, time?: number) => IEvent<T> & { name: N }
+    [K in N]: (data: T, time?: number) => NamedEvent<T, N>;
   };
   return {
     of: <T>() => {
