@@ -445,19 +445,19 @@ type ConsumerConfigs = StreamConfigs & {
   }
 }
 
-type ProduceFunc = (...events: IEvent<any>[]) => {
+export type ProduceFunc = (...events: IEvent<any>[]) => {
   produceMany: ProduceFunc;
   flush: () => Promise<void>;
 }
 
-type StreamGroupConsumer = ConsumeFunctions & {
+export type StreamGroupConsumer = ConsumeFunctions & {
   handle: HandleFunction<any>;
   produce: (...events: IEvent<any>[]) => Promise<void>;
   produceMany: ProduceFunc;
   with: <O extends AllowedFactories<O>>(events: O) => WithTypedHandlers<O>;
 }
 
-type ConsumerGroup = {
+export type ConsumerGroup = {
   stream: (streamName: string, config?: Partial<StreamConfigs>) => StreamGroupConsumer;
 }
 
@@ -467,15 +467,15 @@ type DataOfHandler<T> = T extends (...args: any[]) => IEvent<infer R> ? R : any;
 type ArgsOf<T> = T extends (...args: infer Args) => any ? Args : never;
 
 type AllowedFactories<T> = { [name in (keyof T & string)]: (...args: any[]) => NamedEvent<DataOfHandler<T[name]>, name> };
-type NamedEventHandler<E = IEvent<any>> = (id: string, event: E) => Promise<void>;
+export type NamedEventHandler<E = IEvent<any>> = (id: string, event: E) => Promise<void>;
 
-type ConsumeFunctions = {
+export type ConsumeFunctions = {
   consume: () => Promise<{
     stop: () => void;
     continue: () => void;
   }>;
 }
-type HandleFunction<T> = <N extends (keyof T | '*') >(event: N, handler: NamedEventHandler<N extends keyof T ? ReturnType<T[N]> : IEvent<any>>) => {
+export type HandleFunction<T> = <N extends (keyof T | '*') >(event: N, handler: NamedEventHandler<N extends keyof T ? ReturnType<T[N]> : IEvent<any>>) => {
   handle: HandleFunction<T>;
 } & ConsumeFunctions;
 
@@ -489,3 +489,15 @@ type PromisifiedFunctionsMap<T> = {
   [func in keyof T]: (...args: ArgsOf<T[func]>) => Promise<void>
 };
 
+export const event = <N extends string>(name: N, v = '1.0.0') => {
+  type ReturnType<T, N extends string> = {
+    [K in N]: (data: T, time?: number) => IEvent<T> & { name: N }
+  };
+  return {
+    of: <T>() => {
+      return {
+        [name]: (data: T, time = Date.now()) => ({ name, v, data, time })
+      } as ReturnType<T, N>
+    }
+  }
+}
