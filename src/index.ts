@@ -92,7 +92,6 @@ export class RedisStreams {
       let handle = handlers.get(event);
       if (!handle) handle = handlers.get('*');
       if (!handle) {
-        this.config.logger.warn('No handler for:', groupName, streamName, event, id);
         return;
       };
       return handle(id, eventObj);
@@ -280,9 +279,12 @@ class StreamConsumer {
     }, new Set<string>());
 
     if (this.config.deadLetters && deadMessages.size) {
-      this.logger.info('Dead Letters', JSON.stringify(Array.from(deadMessages)));
+      const deadIds = Array.from(deadMessages);
+      this.logger.trace('Dead Letters', JSON.stringify(deadIds));
       const deadStreamsEntries = streamsEntries.filter(([id]) => deadMessages.has(id));
-      await this.publishDeadLetters(...deadStreamsEntries)
+      await this.publishDeadLetters(...deadStreamsEntries);
+      await this.redis.xack(this.config.streamName,
+        this.config.groupName, ...deadIds);
     }
     const goodStreamsEntries = streamsEntries.filter(([id]) => !deadMessages.has(id));
     if (goodStreamsEntries.length) {
