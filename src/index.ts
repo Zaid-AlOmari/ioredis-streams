@@ -327,7 +327,7 @@ class StreamConsumer {
     }
     catch (err) {
       //log corrupted messages
-      return this.logger.error('Error while parsing message. Corrupted or wrong formated stream message.', id, message, err);
+      return this.logger.error('Error while parsing message. Corrupted or wrong formatted stream message.', id, message, err);
     }
     return this.processEvent(id, event, eventObj)
   }
