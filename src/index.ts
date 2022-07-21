@@ -318,6 +318,9 @@ class StreamConsumer {
   }
 
   protected async processMessage<T>(id: string, message: string[]) {
+    if (!message || !Array.isArray(message) || message.length < 2) {
+      return this.logger.fatal(' Error while parsing message. Corrupted message.', id, message);
+    }
     const [event, value] = message;
     const eventObj: IEvent<T> = JSON.parse(value);
     return this.processEvent(id, event, eventObj)
