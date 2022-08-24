@@ -247,8 +247,11 @@ class StreamConsumer {
         if (claimedAnything && !this.disposing) continue;
         const dataAvaliable = await this.doRead();
         if (dataAvaliable && !this.disposing) continue;
-      } catch (err) {
+      } catch (err: any) {
         this.logger.error('Error while tryReading', err);
+        if (err && typeof err.message === 'string' && err.message.includes('NOGROUP')) {
+          await this.init()
+        }
       }
     }
   }
