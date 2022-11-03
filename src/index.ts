@@ -41,6 +41,10 @@ export interface IEvent<T> {
   data: T;
 }
 
+export interface IWaitEvent<T> extends IEvent<T> {
+  wait: { source: string };
+}
+
 export class RedisStreams {
 
   protected groups: Map<string, Map<string, StreamGroupConsumer>> = new Map();
@@ -148,8 +152,40 @@ export class RedisStreams {
         }
       }
     }
-    const produce = async <T>(...events: IEvent<T>[]) => {
-      await this.doProduce(this.getProducerRedis().pipeline(), streamName, readyConfigs.maxLen, ...events).exec();
+    const produce = async <T>(...events: (IEvent<T> | IWaitEvent<T>)[]) => {
+      if (events.length === 1 && events[0]['wait']) {
+        const pipeline = this.doProduce(this.getProducerRedis().pipeline(), streamName, readyConfigs.maxLen, ...events);
+        return {
+          wait: async (timeout: number) => {
+            const redis = this.getConsumerRedis();
+            const channel = events[0].name + '_' + events[0].time;
+            let id: NodeJS.Timeout | undefined;
+            const cleanup = () => {
+              redis.unsubscribe(channel);
+              redis.disconnect();
+              if (id) clearTimeout(id);
+            }
+            try {
+              await new Promise<any>(async (resolve, reject) => {
+                id = setTimeout(() => reject(new Error('Timeout')), timeout);
+                await redis.subscribe(channel);
+                redis.on('message', (data) => {
+                  try {
+                    const eventObj = JSON.parse(data);
+                    if (eventObj && eventObj.source === events?.[0]?.['wait']?.['source']) resolve(eventObj);
+                  } catch (err) { }
+                });
+                await pipeline.exec();
+              });
+            } finally {
+              cleanup();
+            }
+          }
+        }
+      } else {
+        await this.doProduce(this.getProducerRedis().pipeline(), streamName, readyConfigs.maxLen, ...events).exec();
+      }
+      return;
     }
 
     const newStream = <StreamGroupConsumer>{
@@ -413,9 +449,10 @@ class ConsumerBuffer {
   }
 }
 
-const augmentEvents = <T>(events: T, stream: StreamGroupConsumer) => {
+const augmentEvents = <T extends AllowedFactories<R>, R>(events: T, stream: StreamGroupConsumer) => {
   return Object.keys(events).reduce((p, c) => {
-    p[c] = async (...args: any[]) => stream.produce(events[c](...args))
+    const factory = events[c as keyof T];
+    p[c] = async (...args: any[]) => stream.produce(factory(...args))
     return p;
   }, { ...events, ...stream })
 }
@@ -476,11 +513,12 @@ export type ConsumerGroup = {
 }
 
 type NamedEvent<T, N extends string> = IEvent<T> & { name: N };
+type NamedWaitEvent<T, N extends string> = IWaitEvent<T> & { name: N };
 type ReturnType<T> = T extends (...args: any[]) => infer R ? R : any;
 type DataOfHandler<T> = T extends (...args: any[]) => IEvent<infer R> ? R : any;
 type ArgsOf<T> = T extends (...args: infer Args) => any ? Args : never;
 
-type AllowedFactories<T> = { [name in (keyof T & string)]: (...args: any[]) => IEvent<DataOfHandler<T[name]>> };
+type AllowedFactories<T> = { [name in (keyof T)]: (...args: any[]) => IEvent<DataOfHandler<T[name]>> };
 export type NamedEventHandler<E = IEvent<any>> = (id: string, event: E) => Promise<void>;
 
 export type ConsumeFunctions = {
@@ -500,7 +538,7 @@ type WithTypedHandlers<T> = PromisifiedFunctionsMap<T> & {
 
 
 type PromisifiedFunctionsMap<T> = {
-  [func in keyof T]: (...args: ArgsOf<T[func]>) => Promise<void>
+  [func in keyof T]: (...args: ArgsOf<T[func]>) => ReturnType<T[func]> extends { wait: { source: string } } ? { wait: (timeout: number) => Promise<void> } : Promise<void>
 };
 
 export const event = <N extends string>(name: N, v = '1.0.0') => {
@@ -511,6 +549,21 @@ export const event = <N extends string>(name: N, v = '1.0.0') => {
     of: <T>() => {
       return {
         [name]: (data: T, time = Date.now()) => ({ name, v, data, time })
+      } as ReturnType<T, N>
+    }
+  }
+}
+
+export const eventWithReply = <N extends string>(name: N, source: string, v = '1.0.0') => {
+  type ReturnType<T, N extends string> = {
+    [K in N]: (data: T, time?: number) => NamedWaitEvent<T, N>;
+  };
+  return {
+    of: <T>() => {
+      return {
+        [name]: (data: T, time = Date.now()) => (<IWaitEvent<T>>{
+          name, v, data, time, wait: { source }
+        })
       } as ReturnType<T, N>
     }
   }
