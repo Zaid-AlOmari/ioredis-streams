@@ -3,6 +3,8 @@ import Redis from 'ioredis';
 
 const redisHost = process.env.REDIS_HOST;
 const redisPort = parseInt(process.env.REDIS_PORT || '0');
+const redisCluster = process.env.REDIS_CLUSTER || undefined;
+
 const getDefaultRedisConfigs = () => {
   if (!redisHost || redisHost === '') {
     throw new Error('No redis connection provided (REDIS_HOST) ...')
@@ -10,28 +12,34 @@ const getDefaultRedisConfigs = () => {
   if (!redisPort || redisPort === 0) {
     throw new Error('No redis connection provided (REDIS_PORT) ...')
   }
+  if (redisCluster) {
+    return redisCluster
+      .split(',')
+      .map(x => x.split(':'))
+      .map(([host, port]) => ({ host, port: parseInt(port) }))
+  }
   return {
     host: process.env.REDIS_HOST || '',
     port: parseInt(process.env.REDIS_PORT || '0')
   }
 }
 
-let _redisClient: Redis.Redis;
-export const getExistingRedisClient = (config: {
-  host: string,
-  port: number
-} = getDefaultRedisConfigs()) => {
+let _redisClient: Redis.Redis | Redis.Cluster;
+export const getExistingRedisClient = (config = getDefaultRedisConfigs()) => {
   if (!_redisClient) {
-    _redisClient = new Redis(config);
+    if (config instanceof Array) {
+      _redisClient = new Redis.Cluster(config);
+    }
   }
   return _redisClient;
 };
 
-export const getNewRedisClient = (config: {
-  host: string,
-  port: number
-} = getDefaultRedisConfigs()) => {
-  return new Redis(config);
+export const getNewRedisClient = (config = getDefaultRedisConfigs()) => {
+  if (config instanceof Array) {
+    return new Redis.Cluster(config);
+  } else {
+    return new Redis(config);
+  }
 };
 
 export interface IEvent<T> {
@@ -230,7 +238,7 @@ class StreamConsumer {
   private buffer: ConsumerBuffer;
 
   constructor(
-    protected redis: Redis.Redis,
+    protected redis: Redis.Redis | Redis.Cluster,
     protected processEvent: EventProccessor,
     protected config: ConsumerConfigs) {
 
