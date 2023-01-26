@@ -330,12 +330,12 @@ class StreamConsumer {
     if (this.config.deadLetters && deadMessages.size) {
       const deadIds = Array.from(deadMessages);
       this.logger.trace('Dead Letters', JSON.stringify(deadIds));
-      const deadStreamsEntries = streamsEntries.filter(([id]) => deadMessages.has(id));
+      const deadStreamsEntries = streamsEntries.filter(entry => (entry instanceof Array) && entry.length && deadMessages.has(entry[0]));
       await this.publishDeadLetters(...deadStreamsEntries);
       await this.redis.xack(this.config.streamName,
         this.config.groupName, ...deadIds);
     }
-    const goodStreamsEntries = streamsEntries.filter(([id]) => !deadMessages.has(id));
+    const goodStreamsEntries = streamsEntries.filter((entry => (entry instanceof Array) && entry.length && !deadMessages.has(entry[0])));
     if (goodStreamsEntries.length) {
       this.logger.info('Claimed', goodStreamsEntries.length);
       await this.buffer.add(...goodStreamsEntries);
