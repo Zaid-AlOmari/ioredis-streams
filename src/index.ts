@@ -1,5 +1,5 @@
 import loggerFactory from '@log4js-node/log4js-api';
-import Redis, { ChainableCommander, Cluster, Pipeline } from 'ioredis';
+import Redis, { Pipeline } from 'ioredis';
 
 const redisHost = process.env.REDIS_HOST;
 const redisPort = parseInt(process.env.REDIS_PORT || '0');
@@ -24,7 +24,7 @@ const getDefaultRedisConfigs = () => {
   }
 }
 
-let _redisClient: Redis | Cluster;
+let _redisClient: Redis.Redis | Redis.Cluster;
 export const getExistingRedisClient = (config = getDefaultRedisConfigs()) => {
   if (!_redisClient) {
     if (config instanceof Array) {
@@ -208,13 +208,13 @@ export class RedisStreams {
     return newStream;
   }
 
-  private _currentPipeline: ChainableCommander | undefined;
+  private _currentPipeline: Pipeline | undefined;
   private getRedisPipeline() {
     if (!this._currentPipeline) this._currentPipeline = this.getProducerRedis().multi();
     return this._currentPipeline;
   }
 
-  private doProduce<T>(redis: ChainableCommander, stream: string, maxLen?: number, ...events: IEvent<T>[]) {
+  private doProduce<T>(redis: Pipeline, stream: string, maxLen?: number, ...events: IEvent<T>[]) {
     if (events.length === 0) return redis;
     for (const one of events) {
       const eventString = JSON.stringify(one);
@@ -240,7 +240,7 @@ class StreamConsumer {
   private buffer: ConsumerBuffer;
 
   constructor(
-    protected redis: Redis | Cluster,
+    protected redis: Redis.Redis | Redis.Cluster,
     protected processEvent: EventProccessor,
     protected config: ConsumerConfigs) {
 
@@ -305,7 +305,7 @@ class StreamConsumer {
   lastTimePendingCheck = 0;
   private async doClaim() {
     if (this.lastTimePendingCheck + this.config.claimIdleTime >= Date.now()) return false;
-    const result: ([string, string, number, number])[] = <[string, string, number, number][]>await this.redis.xpending(
+    const result: ([string, string, number, number])[] = await this.redis.xpending(
       this.config.streamName,
       this.config.groupName,
       'IDLE', this.config.claimIdleTime,
@@ -315,7 +315,7 @@ class StreamConsumer {
     if (!result.length) return false;
 
     const toBeClaimedMessages = result.map(([id]) => id);
-    const streamsEntries = <[string, string[]][]>await this.redis.xclaim(
+    const streamsEntries = await this.redis.xclaim(
       this.config.streamName,
       this.config.groupName,
       this.config.peerName,
@@ -344,7 +344,7 @@ class StreamConsumer {
   }
 
   protected async doRead() {
-    const streamsEntries = <[string, [string, string[]][]][]>await this.redis.xreadgroup(
+    const streamsEntries = await this.redis.xreadgroup(
       'GROUP', this.config.groupName,
       this.config.peerName,
       'COUNT', 5,
