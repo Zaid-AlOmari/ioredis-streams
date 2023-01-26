@@ -29,6 +29,8 @@ export const getExistingRedisClient = (config = getDefaultRedisConfigs()) => {
   if (!_redisClient) {
     if (config instanceof Array) {
       _redisClient = new Redis.Cluster(config);
+    } else {
+      _redisClient = new Redis(config);
     }
   }
   return _redisClient;
