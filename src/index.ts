@@ -361,6 +361,7 @@ class StreamConsumer {
         this.checkBacklog = false;
         return false;
       }
+      this.lastReadId = streamEntries[streamEntries.length - 1][0]
       await this.buffer.add(...streamEntries);
     }
     return true;
