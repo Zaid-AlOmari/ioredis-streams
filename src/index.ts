@@ -107,7 +107,7 @@ export class RedisStreams {
       if (!handle) handle = handlers.get('*');
       if (!handle) {
         return;
-      };
+      }
       return handle(id, eventObj);
     };
     const newStream = new StreamConsumer(this.getConsumerRedis(), handler, config);
@@ -482,7 +482,16 @@ export type DeadLetterEvent = IEvent<{
   group: string,
 }>;
 
-export type RedisStreamsConfig = {
+
+export type StreamConfigs = {
+  readBlockTime: number;
+  claimIdleTime: number;
+  batchSize: number;
+  mode: 'parallel' | 'serial';
+  maxLen: number;
+};
+
+export type RedisStreamsConfig = StreamConfigs & {
   redis: {
     host: string,
     port: number
@@ -494,14 +503,6 @@ export type RedisStreamsConfig = {
     maxSize: number;
   };
 }
-
-export type StreamConfigs = {
-  readBlockTime: number;
-  claimIdleTime: number;
-  batchSize: number;
-  mode: 'parallel' | 'serial';
-  maxLen: number;
-};
 
 type ConsumerConfigs = StreamConfigs & {
   peerName: string;
