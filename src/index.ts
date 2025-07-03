@@ -504,7 +504,7 @@ export type RedisStreamsConfig = {
 }
 
 export type RedisStreamsInputConfig = Omit<RedisStreamsConfig, 'redis'> & {
-  redis: | {
+  redis: {
     host: string;
     port: number;
   }
