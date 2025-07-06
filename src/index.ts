@@ -5,18 +5,20 @@ const redisHost = process.env.REDIS_HOST;
 const redisPort = parseInt(process.env.REDIS_PORT || '0');
 const redisCluster = process.env.REDIS_CLUSTER || undefined;
 
+const parseClusterString = (redisCluster: string) => redisCluster
+  .split(',')
+  .map(x => x.split(':'))
+  .map(([host, port]) => ({ host, port: parseInt(port) }));
+
 const getDefaultRedisConfigs = () => {
+  if (redisCluster) {
+    return parseClusterString(redisCluster);
+  }
   if (!redisHost || redisHost === '') {
     throw new Error('No redis connection provided (REDIS_HOST) ...')
   }
-  if (!redisPort || redisPort === 0) {
+  if (!redisPort) {
     throw new Error('No redis connection provided (REDIS_PORT) ...')
-  }
-  if (redisCluster) {
-    return redisCluster
-      .split(',')
-      .map(x => x.split(':'))
-      .map(([host, port]) => ({ host, port: parseInt(port) }))
   }
   return {
     host: process.env.REDIS_HOST || '',
@@ -60,7 +62,7 @@ export class RedisStreams {
   protected groups: Map<string, Map<string, StreamGroupConsumer>> = new Map();
   protected config: RedisStreamsConfig;
 
-  constructor(protected peerName: string, config?: Partial<RedisStreamsConfig>) {
+  constructor(protected peerName: string, config?: Partial<RedisStreamsInputConfig>) {
     this.config = RedisStreams.getDefaultConfigs(peerName, config);
   }
 
@@ -72,11 +74,17 @@ export class RedisStreams {
     return getExistingRedisClient(this.config.redis);
   }
 
-  private static getDefaultConfigs(peerName: string, config?: Partial<RedisStreamsConfig>) {
+  private static getDefaultConfigs(peerName: string, config?: Partial<RedisStreamsInputConfig>) {
+    let cluster: string | undefined;
+    if (config?.redis && 'cluster' in config.redis) {
+      cluster = (config!.redis! as { cluster: string }).cluster;
+    }
+
     return <RedisStreamsConfig>Object.assign(<RedisStreamsConfig>{
       redis: getDefaultRedisConfigs(),
       logger: loggerFactory.getLogger(peerName),
-    }, config || {});
+    }, config || {},
+      { ...(cluster ? { redis: parseClusterString(cluster) } : {}) });
   }
 
   private buildConsumerConfigs(streamName: string, groupName: string, config?: Partial<StreamConfigs>) {
@@ -107,7 +115,7 @@ export class RedisStreams {
       if (!handle) handle = handlers.get('*');
       if (!handle) {
         return;
-      };
+      }
       return handle(id, eventObj);
     };
     const newStream = new StreamConsumer(this.getConsumerRedis(), handler, config);
@@ -494,6 +502,16 @@ export type RedisStreamsConfig = {
     maxSize: number;
   };
 }
+
+export type RedisStreamsInputConfig = Omit<RedisStreamsConfig, 'redis'> & {
+  redis: {
+    host: string;
+    port: number;
+  }
+  | {
+    cluster: string;
+  };
+};
 
 export type StreamConfigs = {
   readBlockTime: number;
