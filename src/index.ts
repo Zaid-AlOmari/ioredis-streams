@@ -1,50 +1,57 @@
 import loggerFactory from '@log4js-node/log4js-api';
-import Redis, { Pipeline } from 'ioredis';
+import { Redis, Cluster, Pipeline, ChainableCommander } from 'ioredis';
 
-const redisHost = process.env.REDIS_HOST;
-const redisPort = parseInt(process.env.REDIS_PORT || '0');
-const redisCluster = process.env.REDIS_CLUSTER || undefined;
 
-const parseClusterString = (redisCluster: string) => redisCluster
-  .split(',')
-  .map(x => x.split(':'))
-  .map(([host, port]) => ({ host, port: parseInt(port) }));
+export class RedisConnection {
+  private static _redisClient: Redis | Cluster | undefined;
 
-const getDefaultRedisConfigs = () => {
-  if (redisCluster) {
-    return parseClusterString(redisCluster);
-  }
-  if (!redisHost || redisHost === '') {
-    throw new Error('No redis connection provided (REDIS_HOST) ...')
-  }
-  if (!redisPort) {
-    throw new Error('No redis connection provided (REDIS_PORT) ...')
-  }
-  return {
-    host: process.env.REDIS_HOST || '',
-    port: parseInt(process.env.REDIS_PORT || '0')
-  }
-}
+  public static getDefaultRedisConfigs(config?: RedisStreamsConfig) {
+    const parseClusterString = (redisCluster: string) => redisCluster
+      .split(',')
+      .map(x => x.split(':'))
+      .map(([host, port]) => ({ host, port: parseInt(port) }));
 
-let _redisClient: Redis.Redis | Redis.Cluster;
-export const getExistingRedisClient = (config = getDefaultRedisConfigs()) => {
-  if (!_redisClient) {
-    if (config instanceof Array) {
-      _redisClient = new Redis.Cluster(config);
+    const cluster = config?.redis && ('cluster' in config.redis) && config.redis.cluster ? config.redis.cluster : process.env.REDIS_CLUSTER;
+    if (cluster !== undefined) {
+      return parseClusterString(cluster);
+    }
+    const host = config?.redis && ('host' in config.redis) && config.redis.host ? config.redis.host : process.env.REDIS_HOST;
+    const port = parseInt(config?.redis && ('port' in config.redis) && config.redis.port ? String(config.redis.port) : process.env.REDIS_PORT || '6379');
+
+    if (host && port && !isNaN(port)) {
+      return {
+        host: host || '',
+        port: port
+      }
+    }
+    return undefined;
+  }
+
+  public static getExistingRedisClient(config?: RedisStreamsConnectionConfig) {
+    if (!this._redisClient) {
+      this._redisClient = this.getNewRedisClient(config);
+    }
+    return this._redisClient;
+  }
+
+  public static getNewRedisClient(config?: RedisStreamsConnectionConfig) {
+    console.log('Creating new Redis client with config:', config);
+    if (!config) {
+      throw new Error('Redis configuration is required to create a new Redis client.');
+    }
+    if (Array.isArray(config)) {
+      return new Redis.Cluster(config);
+    } else if (config && 'host' in config && 'port' in config) {
+      return new Redis(config);
     } else {
-      _redisClient = new Redis(config);
+      throw new Error('Invalid Redis configuration. Please provide either a cluster string or host and port.');
     }
   }
-  return _redisClient;
-};
 
-export const getNewRedisClient = (config = getDefaultRedisConfigs()) => {
-  if (config instanceof Array) {
-    return new Redis.Cluster(config);
-  } else {
-    return new Redis(config);
+  public static resetConnection() {
+    this._redisClient = undefined;
   }
-};
+}
 
 export interface IEvent<T> {
   time: number;
@@ -62,7 +69,7 @@ export class RedisStreams {
   protected groups: Map<string, Map<string, StreamGroupConsumer>> = new Map();
   protected config: RedisStreamsConfig;
 
-  constructor(protected peerName: string, config?: Partial<RedisStreamsInputConfig>) {
+  constructor(protected peerName: string, config?: Partial<RedisStreamsConfig>) {
     this.config = RedisStreams.getDefaultConfigs(peerName, config);
   }
 
@@ -74,17 +81,12 @@ export class RedisStreams {
     return getExistingRedisClient(this.config.redis);
   }
 
-  private static getDefaultConfigs(peerName: string, config?: Partial<RedisStreamsInputConfig>) {
-    let cluster: string | undefined;
-    if (config?.redis && 'cluster' in config.redis) {
-      cluster = (config!.redis! as { cluster: string }).cluster;
-    }
-
-    return <RedisStreamsConfig>Object.assign(<RedisStreamsConfig>{
-      redis: getDefaultRedisConfigs(),
+  private static getDefaultConfigs(peerName: string, config?: Partial<RedisStreamsConfig>) {
+    return <RedisStreamsConfig>{
+      redis: RedisConnection.getDefaultRedisConfigs(),
       logger: loggerFactory.getLogger(peerName),
-    }, config || {},
-      { ...(cluster ? { redis: parseClusterString(cluster) } : {}) });
+      ...config,
+    };
   }
 
   private buildConsumerConfigs(streamName: string, groupName: string, config?: Partial<StreamConfigs>) {
@@ -188,6 +190,7 @@ export class RedisStreams {
             try {
               const reply = await new Promise<R>(async (resolve, reject) => {
                 id = setTimeout(() => reject(new Error('Timeout')), timeout);
+                id.unref();
                 await redis.subscribe(channel);
                 handler = (commingChannel, data) => resolve(JSON.parse(data)['reply']);
                 redis.on('message', handler);
@@ -215,13 +218,13 @@ export class RedisStreams {
     return newStream;
   }
 
-  private _currentPipeline: Pipeline | undefined;
+  private _currentPipeline: ChainableCommander | undefined;
   private getRedisPipeline() {
     if (!this._currentPipeline) this._currentPipeline = this.getProducerRedis().multi();
     return this._currentPipeline;
   }
 
-  private doProduce<T>(redis: Pipeline, stream: string, maxLen?: number, ...events: IEvent<T>[]) {
+  private doProduce<T>(redis: ChainableCommander, stream: string, maxLen?: number, ...events: IEvent<T>[]) {
     if (events.length === 0) return redis;
     for (const one of events) {
       const eventString = JSON.stringify(one);
@@ -247,7 +250,7 @@ class StreamConsumer {
   private buffer: ConsumerBuffer;
 
   constructor(
-    protected redis: Redis.Redis | Redis.Cluster,
+    protected redis: Redis | Cluster,
     protected processEvent: EventProccessor,
     protected config: ConsumerConfigs) {
 
@@ -294,30 +297,52 @@ class StreamConsumer {
   }
 
   protected async tryReading() {
-    while (!this.disposing) {
+    const maxIterations = 1000; // Safety limit to prevent infinite loops
+    let iterations = 0;
+
+    while (!this.disposing && iterations < maxIterations) {
       try {
         const claimedAnything = await this.doClaim()
-        if (claimedAnything && !this.disposing) continue;
+        if (claimedAnything && !this.disposing) {
+          iterations++;
+          continue;
+        }
         const dataAvaliable = await this.doRead();
-        if (dataAvaliable && !this.disposing) continue;
+        if (dataAvaliable && !this.disposing) {
+          iterations++;
+          continue;
+        }
+
+        // Reset counter when no data found and add small delay
+        iterations = 0;
+        await new Promise(resolve => setTimeout(resolve, 100).unref());
+
       } catch (err: any) {
         this.logger.error('Error while tryReading', err);
         if (err && typeof err.message === 'string' && err.message.includes('NOGROUP')) {
           await this.init()
         }
+
+        // Add delay on errors to prevent tight error loops
+        await new Promise(resolve => setTimeout(resolve, 1000).unref());
+        iterations++;
       }
+    }
+
+    if (iterations >= maxIterations) {
+      this.logger.warn('tryReading stopped due to max iterations limit to prevent memory issues');
     }
   }
 
   lastTimePendingCheck = 0;
   private async doClaim() {
     if (this.lastTimePendingCheck + this.config.claimIdleTime >= Date.now()) return false;
-    const result: ([string, string, number, number])[] = await this.redis.xpending(
+    const result = await this.redis.xpending(
       this.config.streamName,
       this.config.groupName,
       'IDLE', this.config.claimIdleTime,
       '-', '+', this.config.batchSize!
-    );
+    ) as ([string, string, number, number])[];
     this.lastTimePendingCheck = Date.now();
     if (!result.length) return false;
 
@@ -337,12 +362,12 @@ class StreamConsumer {
     if (this.config.deadLetters && deadMessages.size) {
       const deadIds = Array.from(deadMessages);
       this.logger.trace('Dead Letters', JSON.stringify(deadIds));
-      const deadStreamsEntries = streamsEntries.filter(entry => (entry instanceof Array) && entry.length && deadMessages.has(entry[0]));
+      const deadStreamsEntries = streamsEntries.filter(entry => (entry instanceof Array) && entry.length && deadMessages.has(entry[0])) as [string, string[]][];
       await this.publishDeadLetters(...deadStreamsEntries);
       await this.redis.xack(this.config.streamName,
         this.config.groupName, ...deadIds);
     }
-    const goodStreamsEntries = streamsEntries.filter((entry => (entry instanceof Array) && entry.length && !deadMessages.has(entry[0])));
+    const goodStreamsEntries = streamsEntries.filter((entry => (entry instanceof Array) && entry.length && !deadMessages.has(entry[0]))) as [string, string[]][];
     if (goodStreamsEntries.length) {
       this.logger.info('Claimed', goodStreamsEntries.length);
       await this.buffer.add(...goodStreamsEntries);
@@ -351,7 +376,10 @@ class StreamConsumer {
   }
 
   protected async doRead() {
-    const streamsEntries = await this.redis.xreadgroup(
+    // Add timeout safety to prevent hanging
+    const timeoutMs = Math.max(this.config.readBlockTime + 5000, 10000); // Block time + 5s buffer
+
+    const readPromise = this.redis.xreadgroup(
       'GROUP', this.config.groupName,
       this.config.peerName,
       'COUNT', 5,
@@ -359,6 +387,22 @@ class StreamConsumer {
       'STREAMS', this.config.streamName,
       this.checkBacklog ? this.lastReadId : '>'
     );
+
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Redis read timeout')), timeoutMs).unref()
+    );
+
+    let streamsEntries;
+    try {
+      streamsEntries = await Promise.race([readPromise, timeoutPromise]);
+    } catch (err: any) {
+      if (err.message === 'Redis read timeout') {
+        this.logger.warn('Redis read operation timed out');
+        return false;
+      }
+      throw err;
+    }
+
     if (!streamsEntries || streamsEntries.length === 0) {
       this.checkBacklog = false;
       return false;
@@ -399,6 +443,9 @@ class StreamConsumer {
 
   async dispose() {
     this.disposing = true;
+
+    // Give some time for the reading loop to finish gracefully
+    await new Promise(resolve => setTimeout(resolve, 500).unref());
   }
 
   async publishDeadLetters(...messages: [string, string[]][]) {
@@ -490,11 +537,10 @@ export type DeadLetterEvent = IEvent<{
   group: string,
 }>;
 
+export type RedisStreamsConnectionConfig = { host: string, port: number } | { cluster: string; }
+
 export type RedisStreamsConfig = {
-  redis: {
-    host: string,
-    port: number
-  },
+  redis: RedisStreamsConnectionConfig,
   logger: loggerFactory.Logger;
   deadLetters?: {
     stream: string;
@@ -502,16 +548,6 @@ export type RedisStreamsConfig = {
     maxSize: number;
   };
 }
-
-export type RedisStreamsInputConfig = Omit<RedisStreamsConfig, 'redis'> & {
-  redis: {
-    host: string;
-    port: number;
-  }
-  | {
-    cluster: string;
-  };
-};
 
 export type StreamConfigs = {
   readBlockTime: number;
@@ -607,3 +643,14 @@ export const eventWithReply = <N extends string>(name: N, source: string, v = '1
     }
   }
 }
+
+
+export const getExistingRedisClient = (config?: RedisStreamsConnectionConfig) => {
+  return RedisConnection.getExistingRedisClient(config);
+};
+export const getNewRedisClient = (config?: RedisStreamsConnectionConfig) => {
+  return RedisConnection.getNewRedisClient(config);
+};
+export const resetRedisConnection = () => {
+  return RedisConnection.resetConnection();
+};
