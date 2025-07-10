@@ -3,9 +3,7 @@
       ".ts", ".js"
   ],
   "include": [
-      "**/interfaces/**",
-      "**/uow/**",
-      "**/utils/**"
+      "**/src/"
   ],
   "exclude": [
       "**/*.d.ts",
