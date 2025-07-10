@@ -1,9 +1,9 @@
 import loggerFactory from '@log4js-node/log4js-api';
-import Redis, { Pipeline } from 'ioredis';
+import { Redis, Cluster, Pipeline, ChainableCommander } from 'ioredis';
 
 
 export class RedisConnection {
-  private static _redisClient: Redis.Redis | Redis.Cluster | undefined;
+  private static _redisClient: Redis | Cluster | undefined;
 
   public static getDefaultRedisConfigs(config?: RedisStreamsConfig) {
     const parseClusterString = (redisCluster: string) => redisCluster
@@ -218,13 +218,13 @@ export class RedisStreams {
     return newStream;
   }
 
-  private _currentPipeline: Pipeline | undefined;
+  private _currentPipeline: ChainableCommander | undefined;
   private getRedisPipeline() {
     if (!this._currentPipeline) this._currentPipeline = this.getProducerRedis().multi();
     return this._currentPipeline;
   }
 
-  private doProduce<T>(redis: Pipeline, stream: string, maxLen?: number, ...events: IEvent<T>[]) {
+  private doProduce<T>(redis: ChainableCommander, stream: string, maxLen?: number, ...events: IEvent<T>[]) {
     if (events.length === 0) return redis;
     for (const one of events) {
       const eventString = JSON.stringify(one);
@@ -250,7 +250,7 @@ class StreamConsumer {
   private buffer: ConsumerBuffer;
 
   constructor(
-    protected redis: Redis.Redis | Redis.Cluster,
+    protected redis: Redis | Cluster,
     protected processEvent: EventProccessor,
     protected config: ConsumerConfigs) {
 
@@ -337,12 +337,12 @@ class StreamConsumer {
   lastTimePendingCheck = 0;
   private async doClaim() {
     if (this.lastTimePendingCheck + this.config.claimIdleTime >= Date.now()) return false;
-    const result: ([string, string, number, number])[] = await this.redis.xpending(
+    const result = await this.redis.xpending(
       this.config.streamName,
       this.config.groupName,
       'IDLE', this.config.claimIdleTime,
       '-', '+', this.config.batchSize!
-    );
+    ) as ([string, string, number, number])[];
     this.lastTimePendingCheck = Date.now();
     if (!result.length) return false;
 
@@ -362,12 +362,12 @@ class StreamConsumer {
     if (this.config.deadLetters && deadMessages.size) {
       const deadIds = Array.from(deadMessages);
       this.logger.trace('Dead Letters', JSON.stringify(deadIds));
-      const deadStreamsEntries = streamsEntries.filter(entry => (entry instanceof Array) && entry.length && deadMessages.has(entry[0]));
+      const deadStreamsEntries = streamsEntries.filter(entry => (entry instanceof Array) && entry.length && deadMessages.has(entry[0])) as [string, string[]][];
       await this.publishDeadLetters(...deadStreamsEntries);
       await this.redis.xack(this.config.streamName,
         this.config.groupName, ...deadIds);
     }
-    const goodStreamsEntries = streamsEntries.filter((entry => (entry instanceof Array) && entry.length && !deadMessages.has(entry[0])));
+    const goodStreamsEntries = streamsEntries.filter((entry => (entry instanceof Array) && entry.length && !deadMessages.has(entry[0]))) as [string, string[]][];
     if (goodStreamsEntries.length) {
       this.logger.info('Claimed', goodStreamsEntries.length);
       await this.buffer.add(...goodStreamsEntries);
