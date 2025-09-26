@@ -382,7 +382,7 @@ class StreamConsumer {
     const readPromise = this.redis.xreadgroup(
       'GROUP', this.config.groupName,
       this.config.peerName,
-      'COUNT', 5,
+      'COUNT', this.config.batchSize,
       'BLOCK', this.config.readBlockTime,
       'STREAMS', this.config.streamName,
       this.checkBacklog ? this.lastReadId : '>'
