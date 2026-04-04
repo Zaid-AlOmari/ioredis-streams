@@ -14,3 +14,4 @@ coverage/
 logs/
 backup.*
 /lib
+merged-coverage.json
