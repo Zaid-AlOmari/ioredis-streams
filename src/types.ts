@@ -1,4 +1,5 @@
 import loggerFactory from '@log4js-node/log4js-api';
+import type { ClusterOptions } from 'ioredis';
 
 export interface IEvent<T> {
   time: number;
@@ -20,6 +21,7 @@ export type DeadLetterEvent = IEvent<{
 
 export type RedisStreamsConfig = {
   redis: { host: string; port: number } | { host: string; port: number }[];
+  clusterOptions?: ClusterOptions;
   logger: loggerFactory.Logger;
   deadLetters?: {
     stream: string;
@@ -32,6 +34,7 @@ export type RedisStreamsInputConfig = Omit<RedisStreamsConfig, 'redis'> & {
   redis:
     | { host: string; port: number }
     | { cluster: string };
+  clusterOptions?: ClusterOptions;
 };
 
 export type StreamConfigs = {

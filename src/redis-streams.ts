@@ -30,13 +30,13 @@ export class RedisStreams {
   private _producerRedis: IRedisClient | undefined;
   protected getProducerRedis(): IRedisClient {
     if (!this._producerRedis) {
-      this._producerRedis = getNewRedisClient(this.config.redis as RedisConfig);
+      this._producerRedis = getNewRedisClient(this.config.redis as RedisConfig, this.config.clusterOptions);
     }
     return this._producerRedis;
   }
 
   protected getConsumerRedis(): IRedisClient {
-    return getNewRedisClient(this.config.redis as RedisConfig);
+    return getNewRedisClient(this.config.redis as RedisConfig, this.config.clusterOptions);
   }
 
   private static buildConfig(
@@ -56,6 +56,7 @@ export class RedisStreams {
       redis: redis as any,
       logger: config?.logger ?? loggerFactory.getLogger(peerName),
       ...(config?.deadLetters ? { deadLetters: config.deadLetters } : {}),
+      ...(config?.clusterOptions ? { clusterOptions: config.clusterOptions } : {}),
     } as RedisStreamsConfig;
   }
 

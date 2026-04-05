@@ -1,4 +1,4 @@
-import Redis from 'ioredis';
+import Redis, { ClusterOptions } from 'ioredis';
 
 export interface IRedisClient {
   xgroup(...args: any[]): Promise<any>;
@@ -44,9 +44,12 @@ export const getDefaultRedisConfigs = (): RedisConfig => {
   return { host: redisHost, port: redisPort };
 };
 
-export const getNewRedisClient = (config: RedisConfig = getDefaultRedisConfigs()): IRedisClient => {
+export const getNewRedisClient = (
+  config: RedisConfig = getDefaultRedisConfigs(),
+  clusterOptions: ClusterOptions = {},
+): IRedisClient => {
   if (config instanceof Array) {
-    return new Redis.Cluster(config) as unknown as IRedisClient;
+    return new Redis.Cluster(config, clusterOptions) as unknown as IRedisClient;
   }
   return new Redis(config) as unknown as IRedisClient;
 };
@@ -54,8 +57,8 @@ export const getNewRedisClient = (config: RedisConfig = getDefaultRedisConfigs()
 // Legacy export kept for backwards compatibility
 export const getExistingRedisClient = (() => {
   let _client: IRedisClient | undefined;
-  return (config: RedisConfig = getDefaultRedisConfigs()): IRedisClient => {
-    if (!_client) _client = getNewRedisClient(config);
+  return (config: RedisConfig = getDefaultRedisConfigs(), clusterOptions: ClusterOptions = {}): IRedisClient => {
+    if (!_client) _client = getNewRedisClient(config, clusterOptions);
     return _client;
   };
 })();
