@@ -1,3 +1,4 @@
 --require source-map-support/register
+--require ../dist-test/test/setup.js
 --ui bdd
 --timeout 60000
