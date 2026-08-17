@@ -303,6 +303,13 @@ await stream['job.queued']({ jobId: 'job-123' });
 
 Stop the consumer cleanly on process exit to avoid mid-flight message loss.
 
+`stop()` stops reading, waits for in-flight/buffered messages to finish processing
+and be acked, and then removes the consumer from the Redis consumer group (via
+`XGROUP DELCONSUMER`) so it stops showing up in `XINFO CONSUMERS` and no longer
+holds a name that a replacement pod would need. **Always `await` it** before the
+process exits (e.g. on pod termination) — otherwise the process may exit before
+the consumer is removed.
+
 ```ts
 import { RedisStreams, event } from 'ioredis-streams';
 
@@ -315,10 +322,10 @@ stream.handle('task.run', async (id, event) => {
 
 const { stop } = await stream.consume();
 
-// Graceful shutdown on SIGTERM / SIGINT
+// Graceful shutdown on SIGTERM / SIGINT (e.g. Kubernetes pod termination)
 const shutdown = async () => {
   console.log('Shutting down...');
-  stop(); // stops reading; in-flight handlers finish naturally
+  await stop(); // finishes in-flight work, then deregisters the consumer
   process.exit(0);
 };
 

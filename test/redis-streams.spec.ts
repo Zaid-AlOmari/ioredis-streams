@@ -367,8 +367,15 @@ describe('RedisStreams - consume() and continue()', () => {
     expect(stop).to.be.a('function');
     expect(cont).to.be.a('function');
 
-    await stop();
+    // let the (fire-and-forget) start() reach the blocked xreadgroup call and assign `unblock`
+    await new Promise(r => setTimeout(r, 0));
+
+    // stop() now waits for the in-flight (blocked) read to finish before resolving
+    const stopping = stop();
     unblock();
+    await stopping;
+
+    expect(fakeConsumer.xgroup.calledWith('DELCONSUMER')).to.be.true;
   });
 
   it('continue() calls start() again on the consumer', async () => {
@@ -384,11 +391,15 @@ describe('RedisStreams - consume() and continue()', () => {
     });
 
     const { stop, continue: cont } = await stream.consume();
-    await stop();
+    // let the (fire-and-forget) start() reach the blocked xreadgroup call and assign `unblock`
+    await new Promise(r => setTimeout(r, 0));
+    const stopping = stop();
     unblock();
+    await stopping;
     // after stop, calling continue re-invokes start (exits immediately since disposing=true)
     cont();
-    expect(fakeConsumer.xgroup.calledOnce).to.be.true; // only one init
+    const createCalls = fakeConsumer.xgroup.getCalls().filter((c: any) => c.args[0] === 'CREATE');
+    expect(createCalls.length).to.equal(1); // only one init
   });
 });
 
