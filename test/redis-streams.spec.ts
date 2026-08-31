@@ -85,6 +85,14 @@ describe('RedisStreams - buildConfig', () => {
     expect((rs as any).config.deadLetters.maxRetries).to.equal(3);
   });
 
+  it('stores clusterOptions when provided', () => {
+    const rs = new TestRedisStreams(createFakeRedis(), [], {
+      redis: { cluster: 'n1:7001' },
+      clusterOptions: { scaleReads: 'slave' },
+    });
+    expect((rs as any).config.clusterOptions).to.deep.equal({ scaleReads: 'slave' });
+  });
+
   it('uses the provided logger instead of creating a default one', () => {
     const myLogger = { trace: () => {}, info: () => {}, error: () => {}, warn: () => {} };
     const rs = new TestRedisStreams(createFakeRedis(), [], {
