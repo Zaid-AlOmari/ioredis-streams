@@ -6,7 +6,7 @@ import { StreamGroupConsumer, IEvent } from '../src/types';
 
 function makeStream(produce: sinon.SinonStub = sinon.stub().resolves()): StreamGroupConsumer {
   const s: StreamGroupConsumer = {
-    consume: async () => ({ stop: () => {}, continue: () => {} }),
+    consume: async () => ({ stop: async () => {}, continue: () => {} }),
     handle: (() => ({ handle: s.handle, consume: s.consume })) as any,
     produce,
     produceMany: () => ({ produceMany: s.produceMany, flush: async () => {} }),

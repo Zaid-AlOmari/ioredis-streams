@@ -60,7 +60,7 @@ export type NamedEventHandler<E = IEvent<any>> = (id: string, event: E) => Promi
 
 export type ConsumeFunctions = {
   consume: () => Promise<{
-    stop: () => void;
+    stop: () => Promise<void>;
     continue: () => void;
   }>;
 };

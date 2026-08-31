@@ -18,6 +18,7 @@ export class StreamConsumer {
   protected checkBacklog = true;
 
   protected readonly buffer: ConsumerBuffer;
+  protected readingLoop: Promise<void> = Promise.resolve();
 
   constructor(
     protected readonly redis: IRedisClient,
@@ -67,7 +68,8 @@ export class StreamConsumer {
 
   async start(): Promise<void> {
     this.logger.trace('Started...');
-    await this.tryReading();
+    this.readingLoop = this.tryReading();
+    await this.readingLoop;
   }
 
   protected async tryReading(): Promise<void> {
@@ -195,6 +197,27 @@ export class StreamConsumer {
 
   async dispose(): Promise<void> {
     this.disposing = true;
+    // Wait for the in-flight read/claim iteration (and everything it buffered) to finish
+    // before deregistering, so we don't delete the consumer out from under active work.
+    await this.readingLoop;
+    await this.removeConsumer();
+  }
+
+  protected async removeConsumer(): Promise<void> {
+    try {
+      await this.redis.xgroup(
+        'DELCONSUMER',
+        this.config.streamName,
+        this.config.groupName,
+        this.config.peerName,
+      );
+      this.logger.trace('Consumer removed from group', this.config.peerName);
+    } catch (err) {
+      this.logger.error(
+        `Error removing consumer '${this.config.peerName}' from group '${this.config.groupName}'`,
+        err,
+      );
+    }
   }
 
   async publishDeadLetters(...messages: [string, string[]][]): Promise<void> {

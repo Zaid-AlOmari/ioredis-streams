@@ -423,6 +423,47 @@ describe('StreamConsumer', () => {
       await consumer.dispose();
       expect(consumer.testDisposing).to.be.true;
     });
+
+    it('removes the consumer from the group via XGROUP DELCONSUMER', async () => {
+      const fake = createFakeRedis();
+      const consumer = new T(fake, async () => undefined, makeConfig());
+      await consumer.dispose();
+      expect(fake.xgroup.calledWith('DELCONSUMER', 'my-stream', 'my-group', 'peer-1')).to.be.true;
+    });
+
+    it('waits for the in-flight reading loop to finish before removing the consumer', async () => {
+      const fake = createFakeRedis();
+      fake.xpending.resolves([]);
+      let unblock!: () => void;
+      fake.xreadgroup.callsFake(async () => {
+        await new Promise<void>(r => { unblock = r; });
+        return null;
+      });
+
+      const consumer = new T(fake, async () => undefined, makeConfig());
+      consumer.lastTimePendingCheck = Date.now(); // skip claim
+
+      const started = consumer.start();
+      // give start() a tick to enter tryReading() and register the in-flight xreadgroup call
+      await new Promise(r => setTimeout(r, 0));
+
+      const disposing = consumer.dispose();
+      // DELCONSUMER must not fire while the read is still blocked
+      expect(fake.xgroup.calledWith('DELCONSUMER')).to.be.false;
+
+      unblock();
+      await started;
+      await disposing;
+
+      expect(fake.xgroup.calledWith('DELCONSUMER', 'my-stream', 'my-group', 'peer-1')).to.be.true;
+    });
+
+    it('logs and swallows errors from XGROUP DELCONSUMER instead of throwing', async () => {
+      const fake = createFakeRedis();
+      fake.xgroup.rejects(new Error('connection closed'));
+      const consumer = new T(fake, async () => undefined, makeConfig());
+      await expect(consumer.dispose()).to.eventually.not.be.rejected;
+    });
   });
 
   describe('publishDeadLetters()', () => {

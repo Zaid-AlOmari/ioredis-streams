@@ -101,7 +101,7 @@ type StreamGroupConsumer = {
   produce(event: IWaitEvent<any>): { wait(timeout: number): Promise<any> }
   produceMany(...events: IEvent<any>[]): { produceMany: ProduceFunc; flush(): Promise<void> }
   handle(event: string | '*', handler: NamedEventHandler): { handle, consume }
-  consume(): Promise<{ stop(): void; continue(): void }>
+  consume(): Promise<{ stop(): Promise<void>; continue(): void }>
   with<O>(events: O): WithTypedHandlers<O>
 }
 ```
@@ -168,18 +168,18 @@ The `id` parameter is the Redis stream entry ID (e.g. `1693000000000-0`). Messag
 
 Starts the consumer loop. Must be called after all `.handle()` registrations.
 
-**Returns:** `Promise<{ stop(): void; continue(): void }>`
+**Returns:** `Promise<{ stop(): Promise<void>; continue(): void }>`
 
 | Method | Description |
 |---|---|
-| `stop()` | Gracefully stops reading new messages. In-flight messages finish processing. |
+| `stop()` | Gracefully stops reading new messages, waits for in-flight/buffered messages to finish processing, then removes the consumer from the Redis consumer group (`XGROUP DELCONSUMER`). Always `await` it — e.g. before your process exits on `SIGTERM` — so the consumer is actually deregistered instead of being left behind (which would otherwise happen every time a pod restarts or is deleted). |
 | `continue()` | Resumes a stopped consumer without re-initializing. |
 
 ```ts
 const { stop, continue: resume } = await stream.consume();
 
 // Later
-stop();
+await stop();
 ```
 
 ### `.with(eventFactories)`
