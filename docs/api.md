@@ -124,9 +124,13 @@ await stream.produce(
 );
 ```
 
+**Errors.** The returned promise rejects when Redis refuses a write, for example `OOM command not allowed when used memory > 'maxmemory'` while Redis is full, as well as on connection errors. The events of one call are sent as a pipeline, which is not atomic: when it rejects, the events before the failed one may already be in the stream, so retrying the call can write them twice.
+
+For an `IWaitEvent`, `.wait(timeout)` rejects with the Redis error if the event cannot be written, and with `Timeout` if no reply arrives in time.
+
 ### `.produceMany(...events)`
 
-Batches events into a Redis pipeline. Call `.flush()` to execute.
+Batches events into a Redis transaction (`MULTI`). Call `.flush()` to execute it.
 
 ```ts
 stream
@@ -137,6 +141,11 @@ stream
 // Nothing is written until flush()
 await stream.produceMany(event4).flush();
 ```
+
+**Errors.** `flush()` rejects when the transaction fails:
+
+- If Redis refuses a command while it is queued (for example while Redis is full), the whole transaction is discarded (`EXECABORT`) and nothing is written.
+- If a command fails while the transaction runs (for example `WRONGTYPE`, when the stream key holds another type), Redis does not roll back: the other events are written. Retrying can write those twice.
 
 ### `.handle(eventName, handler)`
 

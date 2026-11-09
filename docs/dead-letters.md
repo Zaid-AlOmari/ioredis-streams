@@ -9,6 +9,7 @@ When a message fails to process and is retried more times than `maxRetries` allo
 3. On the next poll cycle, another consumer (or the same one) claims idle messages via `XCLAIM`
 4. Each time a message is claimed and retried, Redis increments its delivery counter
 5. When the delivery counter reaches `maxRetries`, the message is written to the dead letter stream and acknowledged (removed from the PEL)
+6. If writing to the dead letter stream fails (for example while Redis is full), the message is **not** acknowledged. It stays in the PEL and is claimed and dead-lettered again on a later cycle, so a message that was partly written can appear in the dead letter stream more than once.
 
 ## Configuration
 
