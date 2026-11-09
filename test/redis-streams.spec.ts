@@ -1,6 +1,6 @@
 import 'mocha';
 import { expect } from 'chai';
-import { RedisStreams } from '../src/redis-streams';
+import { RedisStreams, execOrThrow } from '../src/redis-streams';
 import { StreamConsumer } from '../src/stream-consumer';
 import { IRedisClient } from '../src/redis-client';
 import { ConsumerConfigs, NamedEventHandler, RedisStreamsInputConfig, StreamConfigs } from '../src/types';
@@ -490,5 +490,77 @@ describe('RedisStreams - buildConsumerConfigs deadLetters.handler', () => {
     // xadd was called for the dead-letters stream
     const xaddArgs = (fakePipe as any).xadd.firstCall.args;
     expect(xaddArgs[0]).to.equal('dead-letters');
+  });
+});
+
+// ── failed commands reject ────────────────────────────────────────────────────
+// ioredis resolves exec() with [error, result] pairs when a command fails (e.g. OOM while Redis refuses writes).
+
+const refused = () => new Error("OOM command not allowed when used memory > 'maxmemory'.");
+
+describe('RedisStreams - failed commands reject', () => {
+  it('execOrThrow resolves when every command succeeded, and for an empty or missing result', async () => {
+    const ok = createFakeRedis().pipeline();
+    (ok as any).exec.resolves([[null, '1-0'], [null, '1-1']]);
+    await expect(execOrThrow(ok)).to.be.fulfilled;
+    for (const empty of [null, undefined, []]) {
+      (ok as any).exec.resolves(empty);
+      await expect(execOrThrow(ok)).to.be.fulfilled;
+    }
+  });
+
+  it('execOrThrow rejects with the first failed command', async () => {
+    const pipe = createFakeRedis().pipeline();
+    (pipe as any).exec.resolves([[null, '1-0'], [refused(), null], [new Error('second'), null]]);
+    await expect(execOrThrow(pipe)).to.be.rejectedWith('OOM command not allowed');
+  });
+
+  it('produce() rejects when the XADD is refused', async () => {
+    const fakeProducer = createFakeRedis();
+    const fakePipe = fakeProducer.pipeline();
+    fakeProducer.pipeline.callsFake(() => fakePipe);
+    (fakePipe as any).exec.resolves([[refused(), null]]);
+
+    const stream = new TestRedisStreams(fakeProducer).group('g').stream('s');
+    await expect(stream.produce(makeEvent())).to.be.rejectedWith('OOM command not allowed');
+  });
+
+  it('produceMany().flush() rejects when a command in the transaction fails', async () => {
+    const fakeProducer = createFakeRedis();
+    const fakeMulti = fakeProducer.multi();
+    fakeProducer.multi.callsFake(() => fakeMulti);
+    (fakeMulti as any).exec.resolves([[null, '1-0'], [refused(), null]]);
+
+    const stream = new TestRedisStreams(fakeProducer).group('g').stream('s');
+    await expect(stream.produceMany(makeEvent('a'), makeEvent('b')).flush()).to.be.rejectedWith('OOM command not allowed');
+  });
+
+  it('produce(waitEvent).wait() rejects with the command error instead of timing out', async () => {
+    const fakeProducer = createFakeRedis();
+    const fakePipe = fakeProducer.pipeline();
+    fakeProducer.pipeline.callsFake(() => fakePipe);
+    (fakePipe as any).exec.resolves([[refused(), null]]);
+    const fakeConsumer = createFakeRedis();
+
+    const stream = new TestRedisStreams(fakeProducer, [createFakeRedis(), fakeConsumer]).group('g').stream('s');
+    const waitEvent = { name: 'ping', v: '1', data: {}, time: 1, wait: { source: 'svc' } };
+    await expect((stream.produce(waitEvent) as any).wait(5000)).to.be.rejectedWith('OOM command not allowed');
+    expect(fakeConsumer.disconnect.calledOnce).to.be.true;
+  });
+
+  it('the dead-letters handler rejects when the write is refused, so the dead messages are not acked', async () => {
+    const fakeProducer = createFakeRedis();
+    const fakePipe = fakeProducer.pipeline();
+    fakeProducer.pipeline.callsFake(() => fakePipe);
+    (fakePipe as any).exec.resolves([[refused(), null]]);
+
+    const rs = new TestRedisStreams(fakeProducer, [], {
+      redis: { host: 'h', port: 1 },
+      deadLetters: { stream: 'dead-letters', maxRetries: 3, maxSize: 1000 },
+    });
+    const configs = rs.buildConsumerConfigsPublic('s', 'g');
+    await expect(
+      configs.deadLetters!.handler({ name: 'deadMessage', v: '1', data: {} as any, time: 1 }),
+    ).to.be.rejectedWith('OOM command not allowed');
   });
 });

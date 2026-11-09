@@ -167,6 +167,25 @@ describe('StreamConsumer', () => {
       expect(fake.xack.firstCall.args).to.not.include(goodId);
     });
 
+    it('does not ACK dead messages when publishing them fails, so they stay pending', async () => {
+      const fake = createFakeRedis();
+      const deadId = '1-0';
+      const ev = makeEvent('click');
+      fake.xpending.resolves([[deadId, 'peer', 20000, 3]]);
+      fake.xclaim.resolves([[deadId, encodedMsg(ev)]]);
+
+      const consumer = new T(fake, async () => { throw new Error('processing failed'); }, makeConfig({
+        claimIdleTime: 15000,
+        deadLetters: {
+          maxRetries: 3,
+          handler: async () => { throw new Error("OOM command not allowed when used memory > 'maxmemory'."); },
+        },
+      }));
+
+      await expect(consumer.testDoClaim()).to.be.rejectedWith('OOM command not allowed');
+      expect(fake.xack.called).to.be.false;
+    });
+
     it('skips dead-letter path when no deadLetters config is set', async () => {
       const fake = createFakeRedis();
       // high delivery count but no deadLetters config → treated as normal

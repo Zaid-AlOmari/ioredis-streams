@@ -18,6 +18,17 @@ import {
   StreamGroupConsumer,
 } from './types';
 
+/**
+ * Runs a pipeline or MULTI and throws the first failed command. ioredis resolves `exec()` with [error, result] pairs
+ * instead of rejecting when a command fails (for example `OOM command not allowed` while Redis refuses writes), so
+ * without this check a refused XADD resolved as if the event had been published.
+ */
+export const execOrThrow = async (pipeline: Pick<IRedisClient, 'exec'>): Promise<void> => {
+  const results = await pipeline.exec();
+  const failed = Array.isArray(results) ? results.find(r => Array.isArray(r) && r[0]) : undefined;
+  if (failed) throw failed[0];
+};
+
 export class RedisStreams {
 
   protected readonly groups: Map<string, Map<string, StreamGroupConsumer>> = new Map();
@@ -82,7 +93,7 @@ export class RedisStreams {
               if (!this.config.deadLetters) return;
               const pipeline = this.getProducerRedis().pipeline();
               this.doProduce(pipeline, this.config.deadLetters.stream, this.config.deadLetters.maxSize, ...events);
-              await pipeline.exec();
+              await execOrThrow(pipeline);
             },
           }
         : undefined,
@@ -163,7 +174,7 @@ export class RedisStreams {
         produceMany,
         flush: async () => {
           _currentPipeline = undefined;
-          await pipeline.exec();
+          await execOrThrow(pipeline);
         },
       };
     };
@@ -199,7 +210,7 @@ export class RedisStreams {
                 await redis.subscribe(channel);
                 msgHandler = (_channel: string, data: string) => resolve(JSON.parse(data)['reply']);
                 redis.on('message', msgHandler);
-                await pipeline.exec();
+                await execOrThrow(pipeline).catch(reject);
               });
               return reply;
             } finally {
@@ -215,7 +226,7 @@ export class RedisStreams {
         readyConfigs.maxLen,
         ...events,
       );
-      return pipeline.exec().then(() => {});
+      return execOrThrow(pipeline);
     };
 
     const streamObj: StreamGroupConsumer = {
