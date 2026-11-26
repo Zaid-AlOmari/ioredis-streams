@@ -10,6 +10,8 @@ When a message fails to process and is retried more times than `maxRetries` allo
 4. Each time a message is claimed and retried, Redis increments its delivery counter
 5. When the delivery counter reaches `maxRetries`, the message is written to the dead letter stream and acknowledged (removed from the PEL)
 
+Messages can also be dead-lettered for being too old when a stream sets `maxMessageAge` (see [configuration](./configuration.md#late-messages-maxmessageage)). Those dead letters carry `data.reason: 'too-old'`. Dead letters from too many retries are unchanged and have no `reason` field.
+
 ## Configuration
 
 Enable dead letters on the `RedisStreams` instance:

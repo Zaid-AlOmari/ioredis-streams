@@ -1,7 +1,9 @@
 import loggerFactory from '@log4js-node/log4js-api';
 import { IRedisClient } from './redis-client';
 import { ConsumerBuffer } from './consumer-buffer';
-import { ConsumerConfigs, DeadLetterEvent, IEvent, IWaitEvent } from './types';
+import { RateLimiter } from './rate-limiter';
+import { parseDuration } from './duration';
+import { ConsumerConfigs, DeadLetterEvent, DeadLetterReason, IEvent, IWaitEvent } from './types';
 
 export type EventProcessor = <T>(
   id: string,
@@ -18,6 +20,8 @@ export class StreamConsumer {
   protected checkBacklog = true;
 
   protected readonly buffer: ConsumerBuffer;
+  protected readonly rateLimiter?: RateLimiter;
+  protected readonly maxMessageAgeMs?: number;
   protected readingLoop: Promise<void> = Promise.resolve();
 
   constructor(
@@ -29,12 +33,23 @@ export class StreamConsumer {
       ?? loggerFactory.getLogger(config.streamName + ':Consumer');
 
     if (!this.config.batchSize) this.config.batchSize = 5;
+    if (this.config.rateLimit) this.rateLimiter = new RateLimiter(this.config.rateLimit);
+    if (this.config.maxMessageAge !== undefined) {
+      if (!this.config.deadLetters) {
+        throw new Error(
+          `maxMessageAge on stream '${this.config.streamName}' requires deadLetters to be configured`,
+        );
+      }
+      this.maxMessageAgeMs = parseDuration(this.config.maxMessageAge, 'maxMessageAge');
+    }
 
     this.buffer = new ConsumerBuffer({
       ack: async (...ids: string[]) => {
         await this.redis.xack(this.config.streamName, this.config.groupName, ...ids);
       },
       error: async (id: string, message: string[], error: Error) => {
+        // Counting on ack: a failed message isn't acked, so it gives its spot back.
+        if (this.rateLimiter?.countOn === 'ack') this.rateLimiter.refund(1);
         this.logger.error(
           `Error during processMessage on stream '${this.config.streamName}' with id '${id}'`,
           error,
@@ -75,9 +90,14 @@ export class StreamConsumer {
   protected async tryReading(): Promise<void> {
     while (!this.disposing) {
       try {
-        const claimedAnything = await this.doClaim();
+        // Without a rate limit, read straight away (no extra await) as before.
+        const limit = this.rateLimiter
+          ? await this.waitForReadCapacity(this.rateLimiter)
+          : this.config.batchSize;
+        if (this.disposing || limit < 1) continue;
+        const claimedAnything = await this.doClaim(limit);
         if (claimedAnything && !this.disposing) continue;
-        const dataAvailable = await this.doRead();
+        const dataAvailable = await this.doRead(limit);
         if (dataAvailable && !this.disposing) continue;
       } catch (err: any) {
         this.logger.error('Error while tryReading', err);
@@ -90,15 +110,53 @@ export class StreamConsumer {
     }
   }
 
+  /**
+   * Waits until the rate limit allows a full batch and returns how many messages
+   * the next claim/read may fetch (at most the batch size). Waiting for a full
+   * batch keeps Redis reads at one per batch, and fetching no more than allowed
+   * keeps throttled messages in Redis instead of idling in memory.
+   */
+  protected waitForReadCapacity(limiter: RateLimiter): Promise<number> {
+    return limiter.waitForTokens(this.config.batchSize);
+  }
+
+  /**
+   * Hands entries to the buffer, spending one rate-limit token per entry.
+   * Entries older than `maxMessageAge` go to dead letters instead and are not charged.
+   */
+  protected async consumeEntries(entries: [string, string[]][]): Promise<void> {
+    let fresh = entries;
+    if (this.maxMessageAgeMs !== undefined) {
+      const now = Date.now();
+      const late = entries.filter(([id]) => this.isTooOld(id, now));
+      if (late.length) {
+        fresh = entries.filter(entry => !late.includes(entry));
+        this.logger.warn('Late messages sent to dead letters', JSON.stringify(late.map(([id]) => id)));
+        await this.sendToDeadLetters('too-old', ...late);
+        await this.redis.xack(this.config.streamName, this.config.groupName, ...late.map(([id]) => id));
+      }
+    }
+    if (!fresh.length) return;
+    this.rateLimiter?.take(fresh.length);
+    await this.buffer.add(...fresh);
+  }
+
+  /** A stream id starts with the ms timestamp at which Redis added the entry. */
+  protected isTooOld(id: string, now: number): boolean {
+    const addedAt = Number(id.split('-')[0]);
+    if (!isFinite(addedAt)) return false;
+    return now - addedAt > this.maxMessageAgeMs!;
+  }
+
   lastTimePendingCheck = 0;
 
-  protected async doClaim(): Promise<boolean> {
+  protected async doClaim(limit: number = this.config.batchSize): Promise<boolean> {
     if (this.lastTimePendingCheck + this.config.claimIdleTime >= Date.now()) return false;
 
     const allPending: [string, string, number, number][] = await this.redis.xpending(
       this.config.streamName,
       this.config.groupName,
-      '-', '+', this.config.batchSize!,
+      '-', '+', limit,
     );
     this.lastTimePendingCheck = Date.now();
 
@@ -125,7 +183,7 @@ export class StreamConsumer {
       const deadEntries = streamsEntries.filter(
         entry => Array.isArray(entry) && entry.length && deadMessages.has(entry[0]),
       );
-      await this.publishDeadLetters(...deadEntries);
+      await this.sendToDeadLetters(undefined, ...deadEntries);
       await this.redis.xack(this.config.streamName, this.config.groupName, ...deadIds);
     }
 
@@ -134,17 +192,17 @@ export class StreamConsumer {
     );
     if (goodEntries.length) {
       this.logger.info('Claimed', goodEntries.length);
-      await this.buffer.add(...goodEntries);
+      await this.consumeEntries(goodEntries);
     }
 
     return true;
   }
 
-  protected async doRead(): Promise<boolean> {
+  protected async doRead(limit: number = this.config.batchSize): Promise<boolean> {
     const streamsEntries: [string, [string, string[]][]][] = await this.redis.xreadgroup(
       'GROUP', this.config.groupName,
       this.config.peerName,
-      'COUNT', this.config.batchSize,
+      'COUNT', limit,
       'BLOCK', this.config.readBlockTime,
       'STREAMS', this.config.streamName,
       this.checkBacklog ? this.lastReadId : '>',
@@ -161,7 +219,7 @@ export class StreamConsumer {
         return false;
       }
       this.lastReadId = streamEntries[streamEntries.length - 1][0];
-      await this.buffer.add(...streamEntries);
+      await this.consumeEntries(streamEntries);
     }
 
     return true;
@@ -197,6 +255,7 @@ export class StreamConsumer {
 
   async dispose(): Promise<void> {
     this.disposing = true;
+    this.rateLimiter?.cancel();
     // Wait for the in-flight read/claim iteration (and everything it buffered) to finish
     // before deregistering, so we don't delete the consumer out from under active work.
     await this.readingLoop;
@@ -221,6 +280,13 @@ export class StreamConsumer {
   }
 
   async publishDeadLetters(...messages: [string, string[]][]): Promise<void> {
+    return this.sendToDeadLetters(undefined, ...messages);
+  }
+
+  protected async sendToDeadLetters(
+    reason: DeadLetterReason | undefined,
+    ...messages: [string, string[]][]
+  ): Promise<void> {
     if (!this.config.deadLetters) return;
 
     const finalEvents: DeadLetterEvent[] = messages.map(([id, message]) => ({
@@ -232,6 +298,8 @@ export class StreamConsumer {
         message,
         stream: this.config.streamName,
         group: this.config.groupName,
+        // Retry dead letters keep their original shape; only new reasons add a field.
+        ...(reason ? { reason } : {}),
       },
       by: { userId: this.config.peerName },
     } as any));
