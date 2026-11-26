@@ -80,6 +80,8 @@ These can be set per-stream when calling `.stream(name, options)`:
 | `readBlockTime` | `number` (ms) | `5000` | How long to block waiting for new messages |
 | `claimIdleTime` | `number` (ms) | `15000` | How long a message must be idle before another consumer can claim it |
 | `maxLen` | `number` | `100000` | Maximum number of entries the stream will hold (trimmed with `MAXLEN ~`) |
+| `rateLimit` | `{ maxMessages: number; duration: Duration }` | not set (no limit) | Caps how many messages this consumer takes per `duration` (see below) |
+| `maxMessageAge` | `Duration` | not set (no age limit) | Messages older than this when picked up go to dead letters instead of being processed (see below) |
 
 ```ts
 const stream = streams
@@ -92,6 +94,55 @@ const stream = streams
     maxLen: 50000,
   });
 ```
+
+### Durations
+
+`rateLimit.duration` and `maxMessageAge` take a number of milliseconds or a string with a unit: `'500ms'`, `'10s'`, `'1m'`, `'2h'`, `'1d'` (decimals like `'1.5s'` work too).
+
+### Rate limiting consumption
+
+Both options below are **optional and off by default**. If `rateLimit` is not set, the consumer reads as fast as it can; if `maxMessageAge` is not set, every message is eventually processed no matter how old it is.
+
+Set `rateLimit` to cap how fast a consumer takes messages off a stream, for example to protect a downstream API or database:
+
+```ts
+const stream = streams
+  .group('my-group')
+  .stream('orders', {
+    batchSize: 10,
+    rateLimit: { maxMessages: 100, duration: '1m' }, // at most 100 messages per minute
+  });
+```
+
+- It is a token bucket: the bucket holds `maxMessages` tokens and refills continuously at `maxMessages / duration`. Up to `maxMessages` can be taken in a burst, then messages are taken at that average rate. Its memory is a few numbers per consumer, whatever the limit.
+- Because of bursts, a single `duration` window can see up to 2 × `maxMessages` (a full bucket plus what refills during the window). The long-run average never exceeds the limit.
+- The consumer always honours `batchSize`: it waits until a full batch is allowed (`batchSize`, or `maxMessages` if that is smaller) and then fetches it in one Redis call. Throttled messages stay in Redis instead of waiting in memory.
+- `countOn` sets when a message counts against the limit:
+  - `'read'` (default): when it is taken from Redis. A failed message stays counted, and each retry counts again. Use this to protect a downstream system from every attempt.
+  - `'ack'`: a spot is held when the message is taken from Redis, and given back if the handler fails (the message is not acked). Only successfully handled messages use up the limit.
+
+  ```ts
+  rateLimit: { maxMessages: 100, duration: '1m', countOn: 'ack' }
+  ```
+- The limit applies to each consumer instance. With 3 instances of a service in the same group, the group as a whole can consume up to 3 × the limit.
+- Messages sent to dead letters (too many retries, or too old) do not count against the limit.
+
+### Late messages (`maxMessageAge`)
+
+Set `maxMessageAge` to stop processing messages that are too old to be useful by the time the consumer gets to them, e.g. because of a backlog or a rate limit:
+
+```ts
+const stream = streams
+  .group('my-group')
+  .stream('notifications', {
+    maxMessageAge: '5m', // anything older than 5 minutes is a late message
+  });
+```
+
+- Age is measured from the message's stream id, i.e. when Redis received it.
+- The check runs when the consumer picks a message up, both on normal reads and when claiming idle messages from other consumers.
+- A late message is written to the dead letter stream with `reason: 'too-old'` and acknowledged, so it is not processed by this group.
+- Dead letters must be configured on the `RedisStreams` instance; setting `maxMessageAge` without them throws when the stream is created.
 
 ---
 

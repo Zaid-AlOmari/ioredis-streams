@@ -1,5 +1,7 @@
 import loggerFactory from '@log4js-node/log4js-api';
 import type { ClusterOptions } from 'ioredis';
+import type { RateLimitConfig } from './rate-limiter';
+import type { Duration } from './duration';
 
 export interface IEvent<T> {
   time: number;
@@ -17,7 +19,14 @@ export type DeadLetterEvent = IEvent<{
   message: string[];
   stream: string;
   group: string;
+  /**
+   * Set to `'too-old'` when the message was older than the stream's `maxMessageAge`.
+   * Absent for dead letters caused by too many delivery attempts (unchanged format).
+   */
+  reason?: DeadLetterReason;
 }>;
+
+export type DeadLetterReason = 'too-old';
 
 export type RedisStreamsConfig = {
   redis: { host: string; port: number } | { host: string; port: number }[];
@@ -43,6 +52,19 @@ export type StreamConfigs = {
   batchSize: number;
   mode: 'parallel' | 'serial';
   maxLen: number;
+  /**
+   * Optional cap on how fast this consumer takes messages off the stream,
+   * e.g. `{ maxMessages: 100, duration: '1m' }` for 100 messages per minute.
+   * Applies per consumer instance, not across the whole group.
+   */
+  rateLimit?: RateLimitConfig;
+  /**
+   * Optional maximum age of a message when the consumer picks it up, e.g. `'5m'`.
+   * Older ("late") messages are sent to dead letters with reason `'too-old'` and
+   * acked instead of being processed. Age is measured from the stream entry id,
+   * i.e. when Redis received the message. Requires dead letters to be configured.
+   */
+  maxMessageAge?: Duration;
 };
 
 export type ConsumerConfigs = StreamConfigs & {
